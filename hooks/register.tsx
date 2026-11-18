@@ -922,6 +922,7 @@ export const register: Register = on => {
                 onSubmit={v => void update($, query, () => v)}
               />
             </Box>
+            {groups.length > 1 && Select && <Box key="filter-gap" flexGrow={1} />}
             {groups.length > 1 && Select && (
               <Select
                 key="project-filter"
