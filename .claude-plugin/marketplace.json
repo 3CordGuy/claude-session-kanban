@@ -1,0 +1,5 @@
+{
+  "name": "session-kanban",
+  "owner": { "name": "session-kanban" },
+  "plugins": [{ "name": "session-kanban", "source": "./" }]
+}
