@@ -254,27 +254,87 @@ async function mirrorToStore($: $Any, board: Record<string, unknown>): Promise<v
 }
 
 /** Pulls what other sessions changed into this board; redraws only on change. */
+// What this session last saw, written to status/<session>.json beside the
+// board every 10 seconds so a session that misbehaves can be checked from
+// outside it.
+let lastSyncError = ''
+let lastRenderAt = 0
+let lastStatusAt = 0
+
+async function writeStatus($: $Any, fileView: unknown): Promise<void> {
+  const now = await $.clock.now()
+  if (now - lastStatusAt < 10_000) return
+  lastStatusAt = now
+  try {
+    const id = await $.session.id()
+    const dir = (await boardFile($)).replace(/board\.json$/, 'status')
+    const running = (await readJson($, `${$.plugin.root}/.claude-plugin/plugin.json`))?.version ?? null
+    await $.fs.write(
+      `${dir}/${id}.json`,
+      JSON.stringify(
+        {
+          at: new Date(now).toISOString(),
+          version: running,
+          viewShown: await read($, view),
+          viewInFile: fileView ?? null,
+          fileBroken,
+          lastSyncError: lastSyncError || null,
+          lastRenderAt: lastRenderAt ? new Date(lastRenderAt).toISOString() : null,
+        },
+        null,
+        2,
+      ),
+    )
+  } catch {
+    // best effort
+  }
+}
+
 async function syncBoard($: $Any): Promise<void> {
   // A failure isn't for good: try the shared file again every 30 seconds.
   if (fileBroken && (await $.clock.now()) - brokenAt > RETRY_FILE_MS) fileBroken = false
   const board = await readBoard($)
-  if (!fileBroken) await mirrorToStore($, board)
-  const cols = (board.columns ?? {}) as Record<string, ColumnId>
-  if (!same(cols, await read($, columns))) await update($, columns, () => cols)
-  const names = (board.labels ?? {}) as Record<string, string>
-  if (!same(names, await read($, labels))) await update($, labels, () => names)
-  if ((board.view === 'board' || board.view === 'list') && board.view !== (await read($, view))) {
-    const v = board.view
-    await update($, view, () => v)
+  const errors: string[] = []
+  // Each step on its own, settings first: one that fails can't keep the
+  // rest from applying.
+  const step = async (name: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn()
+    } catch (err) {
+      errors.push(`${name}: ${String((err as Error)?.message ?? err).slice(0, 160)}`)
+    }
   }
-  if (typeof board.sidebarHidden === 'boolean' && board.sidebarHidden !== (await read($, sidebarHidden))) {
-    const hidden = board.sidebarHidden
-    await update($, sidebarHidden, () => hidden)
-  }
-  if ((board.mode === 'light' || board.mode === 'dark') && board.mode !== (await read($, mode))) {
-    const m = board.mode
-    await update($, mode, () => m)
-  }
+  await step('view', async () => {
+    if ((board.view === 'board' || board.view === 'list') && board.view !== (await read($, view))) {
+      const v = board.view
+      await update($, view, () => v)
+    }
+  })
+  await step('mode', async () => {
+    if ((board.mode === 'light' || board.mode === 'dark') && board.mode !== (await read($, mode))) {
+      const m = board.mode
+      await update($, mode, () => m)
+    }
+  })
+  await step('sidebar', async () => {
+    if (typeof board.sidebarHidden === 'boolean' && board.sidebarHidden !== (await read($, sidebarHidden))) {
+      const hidden = board.sidebarHidden
+      await update($, sidebarHidden, () => hidden)
+    }
+  })
+  await step('labels', async () => {
+    const names = (board.labels ?? {}) as Record<string, string>
+    if (!same(names, await read($, labels))) await update($, labels, () => names)
+  })
+  await step('columns', async () => {
+    const cols = (board.columns ?? {}) as Record<string, ColumnId>
+    if (!same(cols, await read($, columns))) await update($, columns, () => cols)
+  })
+  await step('mirror', async () => {
+    if (!fileBroken) await mirrorToStore($, board)
+  })
+  lastSyncError = errors.join(' | ')
+  await writeStatus($, board.view)
 }
 
 function withLabels(names: Record<string, string>): { id: ColumnId; label: string }[] {
@@ -847,6 +907,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    lastRenderAt = await $.clock.now()
     void claimLive($)
     const els = $.ui.resolve(e)
     const { Box, Text, Button, Link } = els

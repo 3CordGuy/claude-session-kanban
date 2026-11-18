@@ -131,7 +131,13 @@ test('a session that starts later shows cards where the shared file put them', a
   expect(at(/Merged one/)).toBeGreaterThan(at(/^Done\/Cleanup/))
   // Every write went to the shared files, never into a project folder.
   const PREFS = '/home/.claude/session-kanban/prefs.json'
-  expect([...files.keys()].sort()).toEqual([BOARD, '/home/.claude/session-kanban/live.json', PREFS])
+  const written = [...files.keys()].sort()
+  expect(written.filter(p => !p.includes('/status/'))).toEqual([BOARD, '/home/.claude/session-kanban/live.json', PREFS])
+  expect(written.every(p => p.startsWith('/home/.claude/session-kanban/'))).toBe(true)
+  // Each session reports what it shows, for checking from outside.
+  const status = JSON.parse(files.get(written.find(p => p.includes('/status/'))!)!)
+  expect(status.viewShown).toBe('board')
+  expect(status.lastSyncError).toBe(null)
   // The settings were carried over into prefs.json.
   expect(JSON.parse(files.get(PREFS)!)).toEqual({ view: 'board', mode: 'dark' })
 
