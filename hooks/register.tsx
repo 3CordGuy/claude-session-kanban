@@ -86,9 +86,22 @@ async function boardFile($: $Any): Promise<string> {
   return boardPath
 }
 
+// Settings you change by hand (view, theme, sidebar, column names) live in a
+// file of their own beside the board. Every session rewrites board.json every
+// 30 seconds, and a rewrite racing a click could undo it; prefs.json is
+// written only when you change one of these.
+const PREF_KEYS = new Set(['view', 'mode', 'sidebarHidden', 'labels'])
+const fileFor = async ($: $Any, key: string) => {
+  const board = await boardFile($)
+  return PREF_KEYS.has(key) ? board.replace(/board\.json$/, 'prefs.json') : board
+}
+
 // Where the shared file can't be read or written, the board falls back to
 // the plugin's own store (shared less promptly, but it never stops drawing).
 let fileBroken = false
+
+// The file is there but didn't parse: another session is writing it.
+class BoardBusy extends Error {}
 
 async function storeBoard($: $Any): Promise<Record<string, unknown>> {
   const board: Record<string, unknown> = {}
@@ -101,27 +114,44 @@ async function readBoard($: $Any): Promise<Record<string, unknown>> {
   try {
     return await readBoardFile($)
   } catch (err) {
+    // Caught mid-write: use the store this once and read the file next time.
+    if (err instanceof BoardBusy) return storeBoard($)
     fileBroken = true
     $.ui.log(`session-kanban: shared board file unavailable (${String((err as Error)?.message ?? err).slice(0, 120)}); using the plugin store`)
     return storeBoard($)
   }
 }
 
+/** One JSON file, or undefined when there is none; throws BoardBusy when it won't parse. */
+async function readShared($: $Any, path: string): Promise<Record<string, unknown> | undefined> {
+  for (let tries = 0; tries < 5; tries++) {
+    try {
+      const parsed: unknown = JSON.parse(await $.fs.read(path))
+      if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>
+    } catch {
+      // missing, or caught mid-write: look again
+    }
+    if (!(await $.fs.exists(path))) return undefined
+  }
+  throw new BoardBusy(`${path} is being written`)
+}
+
 async function readBoardFile($: $Any): Promise<Record<string, unknown>> {
   const path = await boardFile($)
-  try {
-    const parsed: unknown = JSON.parse(await $.fs.read(path))
-    if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>
-  } catch {
-    // missing or mid-write: fall through
-  }
+  const prefsPath = path.replace(/board\.json$/, 'prefs.json')
+  let board = await readShared($, path)
   // First run: start from what this plugin's own store holds.
-  if (!(await $.fs.exists(path))) {
-    const seed = await storeBoard($)
-    await $.fs.write(path, JSON.stringify(seed, null, 2))
-    return seed
+  if (!board) {
+    board = await storeBoard($)
+    await $.fs.write(path, JSON.stringify(board, null, 2))
   }
-  return {}
+  let prefs = await readShared($, prefsPath)
+  // Before prefs.json: carry the settings over from board.json.
+  if (!prefs) {
+    prefs = Object.fromEntries(Object.entries(board).filter(([k]) => PREF_KEYS.has(k)))
+    await $.fs.write(prefsPath, JSON.stringify(prefs, null, 2))
+  }
+  return { ...board, ...prefs }
 }
 
 async function sget($: $Any, key: string): Promise<unknown> {
@@ -133,11 +163,16 @@ async function sset($: $Any, key: string, value: unknown): Promise<void> {
   await $.store.set(key, value as never)
   if (fileBroken) return
   try {
-    const path = await boardFile($)
-    const board = await readBoardFile($)
-    board[key] = value
-    await $.fs.write(path, JSON.stringify(board, null, 2))
+    const path = await fileFor($, key)
+    // Never write over a file that couldn't be read: that would drop every other key.
+    const file = (await readShared($, path)) ?? {}
+    file[key] = value
+    await $.fs.write(path, JSON.stringify(file, null, 2))
   } catch (err) {
+    if (err instanceof BoardBusy) {
+      $.ui.log(`session-kanban: board file busy; ${key} kept in the plugin store until the next change`)
+      return
+    }
     fileBroken = true
     $.ui.log(`session-kanban: couldn't write the shared board file (${String((err as Error)?.message ?? err).slice(0, 120)}); using the plugin store`)
   }

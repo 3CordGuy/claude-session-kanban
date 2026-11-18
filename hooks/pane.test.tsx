@@ -127,8 +127,72 @@ test('a session that starts later shows cards where the shared file put them', a
   expect(at(/Running one/)).toBeGreaterThan(at(/^In Progress/))
   expect(at(/Running one/)).toBeLessThan(at(/^Testing\/Review/))
   expect(at(/Merged one/)).toBeGreaterThan(at(/^Done\/Cleanup/))
-  // Every write went to the one shared file, never into a project folder.
-  expect([...files.keys()]).toEqual([BOARD])
+  // Every write went to the shared files, never into a project folder.
+  const PREFS = '/home/.claude/session-kanban/prefs.json'
+  expect([...files.keys()].sort()).toEqual([BOARD, PREFS])
+  // The settings were carried over into prefs.json.
+  expect(JSON.parse(files.get(PREFS)!)).toEqual({ view: 'board', mode: 'dark' })
+
+  // Switching to List writes prefs.json only, so the 30-second board.json
+  // rewrites in other sessions can't undo it.
+  await ui.press({ key: 'view-list' })
+  expect(JSON.parse(files.get(PREFS)!).view).toBe('list')
+  expect(JSON.parse(files.get(BOARD)!).view).toBe('board')
+
+  await ui.unmount()
+})
+
+test('a board.json caught mid-write is never written over with a fragment', async ($, on) => {
+  const BOARD = '/home/.claude/session-kanban/board.json'
+  const files = new Map<string, string>([
+    [BOARD, '{"columns": {"local_a"'],
+    ['/home/.claude/session-kanban/prefs.json', JSON.stringify({ view: 'list', mode: 'dark' })],
+  ])
+  const store = new Map<string, unknown>()
+  on('command.register', () => ({ value: { command: 'kanban' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  // As desktop sessions report it: no config root, so the path comes from HOME.
+  on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('mcp.call', (_, e) => {
+    const tool = (e as { tool?: string }).tool
+    const body =
+      tool === 'list_sessions' ? SESSIONS : tool === 'get_session' ? { sessionId: 'local_self', title: 'This one', link: 'claude://x' } : {}
+    return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
+  })
+  on('fs.read', (_, e) => {
+    const text = files.get((e as { path: string }).path)
+    if (text === undefined) throw new Error('missing')
+    return { value: text }
+  })
+  on('fs.exists', (_, e) => ({ value: files.has((e as { path: string }).path) }))
+  on('fs.write', (_, e) => {
+    const w = e as { path: string; text: string }
+    files.set(w.path, w.text)
+    return { value: undefined }
+  })
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.get', (_, e) => ({ value: store.get((e as { key: string }).key) }))
+  on('store.set', (_, e) => {
+    const w = e as { key: string; value: unknown }
+    store.set(w.key, w.value)
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home' : undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: Date.parse('2026-01-02T00:00:00Z') }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'kanban', args: '' } as Parameters<typeof $.command.run>[0])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Refreshes and the view toggle all ran with the file unreadable.
+  await ui.press({ key: 'view-board' })
+  expect(files.get(BOARD)).toBe('{"columns": {"local_a"')
+  expect(JSON.parse(files.get('/home/.claude/session-kanban/prefs.json')!).view).toBe('board')
   await ui.unmount()
 })
 
