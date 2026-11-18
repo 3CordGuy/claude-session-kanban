@@ -46,7 +46,9 @@ const labels = atom({ plugin: 'session-kanban', key: 'labels' } as const, {} as 
 const renaming = atom({ plugin: 'session-kanban', key: 'renaming' } as const, '')
 // The New session bar: open or not, and the project folder picked in it.
 const creating = atom({ plugin: 'session-kanban', key: 'creating' } as const, false)
-// Project chips picked under the search field; none picked shows every project.
+// The project picked in the filter beside search (one at most); none shows every project.
+// Chips stand in where the surface has no Select.
+const ALL_PROJECTS = '__all__'
 const projectFilter = atom({ plugin: 'session-kanban', key: 'projectFilter' } as const, [] as string[])
 const versions = atom({ plugin: 'session-kanban', key: 'versions' } as const, {} as Versions)
 const newProject = atom({ plugin: 'session-kanban', key: 'newProject' } as const, '')
@@ -755,7 +757,7 @@ export const register: Register = on => {
     const Select = 'Select' in els ? els.Select : undefined
     const picks = await read($, projectFilter)
     const list = filterCards(all, q).filter(c => picks.length === 0 || picks.includes(c.group ?? 'other'))
-    // One chip per project, busiest first.
+    // One filter option per project, busiest first.
     const groupCounts = new Map<string, number>()
     for (const c of all) groupCounts.set(c.group ?? 'other', (groupCounts.get(c.group ?? 'other') ?? 0) + 1)
     const groups = [...groupCounts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -910,7 +912,7 @@ export const register: Register = on => {
         )}
         {Input && (
           <Box key="search" flexDirection="row" alignItems="center" gap={1} marginBottom={1}>
-            <Box width={44} flexShrink={1}>
+            <Box width={56} flexShrink={1}>
               <Input
                 key="search-input"
                 placeholder="Search title, project, branch or #PR"
@@ -920,7 +922,19 @@ export const register: Register = on => {
                 onSubmit={v => void update($, query, () => v)}
               />
             </Box>
-            {groups.length > 1 && (
+            {groups.length > 1 && Select && (
+              <Select
+                key="project-filter"
+                label="Project"
+                value={picks[0] ?? ALL_PROJECTS}
+                options={[
+                  { value: ALL_PROJECTS, label: `All projects (${all.length})` },
+                  ...groups.map(([g, n]) => ({ value: g, label: `${g} (${n})` })),
+                ]}
+                onSelect={v => void update($, projectFilter, () => (v === ALL_PROJECTS ? [] : [v]))}
+              />
+            )}
+            {groups.length > 1 && !Select && (
               <Box key="chips" flexDirection="row" flexWrap="wrap" alignItems="center" gap={1} flexShrink={1}>
                 {chip('all', `All ${all.length}`, picks.length === 0, () => void update($, projectFilter, () => []))}
                 {groups.map(([g, n]) => chip(g, `${g} ${n}`, picks.includes(g), () => togglePick(g)))}

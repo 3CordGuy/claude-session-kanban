@@ -307,7 +307,7 @@ test('New session starts a session in the picked project with the typed task', a
   await ui.unmount()
 })
 
-test('project chips filter the board to the picked projects', async ($, on) => {
+test('the project dropdown filters the board to the picked project', async ($, on) => {
   on('command.register', () => ({ value: { command: 'kanban' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -356,10 +356,10 @@ test('project chips filter the board to the picked projects', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const shown = async () => (await ui.findAll({ type: 'Text', in: 'board' })).map(t => t.text ?? '').join(' | ')
   expect(await shown()).toContain('Site work')
-  await ui.press({ key: 'chip-btn:app' })
+  await ui.select({ key: 'project-filter', value: 'app' })
   expect(await shown()).toContain('App work')
   expect(await shown()).not.toContain('Site work')
-  await ui.press({ key: 'chip-btn:all' })
+  await ui.select({ key: 'project-filter', value: '__all__' })
   expect(await shown()).toContain('Site work')
   await ui.unmount()
 })
