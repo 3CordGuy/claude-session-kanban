@@ -99,6 +99,28 @@ const fileFor = async ($: $Any, key: string) => {
 // Where the shared file can't be read or written, the board falls back to
 // the plugin's own store (shared less promptly, but it never stops drawing).
 let fileBroken = false
+let brokenAt = 0
+const RETRY_FILE_MS = 30_000
+
+// Falls back to the store, and notes why under diag:<session> in the store,
+// so the cause can be read later. The file is tried again after 30 seconds.
+async function markBroken($: $Any, where: string, err: unknown): Promise<void> {
+  fileBroken = true
+  brokenAt = await $.clock.now().catch(() => Date.now())
+  const why = String((err as Error)?.message ?? err).slice(0, 300)
+  $.ui.log(`session-kanban: shared board file unavailable at ${where} (${why}); using the plugin store`)
+  try {
+    const id = await $.session.id()
+    await $.store.set(`diag:${id}`, {
+      at: new Date(brokenAt).toISOString(),
+      where,
+      why,
+      path: boardPath ?? null,
+    } as never)
+  } catch {
+    // diagnostics are best effort
+  }
+}
 
 // The file is there but didn't parse: another session is writing it.
 class BoardBusy extends Error {}
@@ -116,8 +138,7 @@ async function readBoard($: $Any): Promise<Record<string, unknown>> {
   } catch (err) {
     // Caught mid-write: use the store this once and read the file next time.
     if (err instanceof BoardBusy) return storeBoard($)
-    fileBroken = true
-    $.ui.log(`session-kanban: shared board file unavailable (${String((err as Error)?.message ?? err).slice(0, 120)}); using the plugin store`)
+    await markBroken($, 'read', err)
     return storeBoard($)
   }
 }
@@ -173,8 +194,7 @@ async function sset($: $Any, key: string, value: unknown): Promise<void> {
       $.ui.log(`session-kanban: board file busy; ${key} kept in the plugin store until the next change`)
       return
     }
-    fileBroken = true
-    $.ui.log(`session-kanban: couldn't write the shared board file (${String((err as Error)?.message ?? err).slice(0, 120)}); using the plugin store`)
+    await markBroken($, `write ${key}`, err)
   }
 }
 
@@ -235,6 +255,8 @@ async function mirrorToStore($: $Any, board: Record<string, unknown>): Promise<v
 
 /** Pulls what other sessions changed into this board; redraws only on change. */
 async function syncBoard($: $Any): Promise<void> {
+  // A failure isn't for good: try the shared file again every 30 seconds.
+  if (fileBroken && (await $.clock.now()) - brokenAt > RETRY_FILE_MS) fileBroken = false
   const board = await readBoard($)
   if (!fileBroken) await mirrorToStore($, board)
   const cols = (board.columns ?? {}) as Record<string, ColumnId>

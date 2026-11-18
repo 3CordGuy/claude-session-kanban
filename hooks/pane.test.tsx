@@ -197,7 +197,7 @@ test('only the live session writes the board; drawing it makes this one live', a
 
   // Drawing the board here claims it, and this session catches the board up.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  for (let i = 0; i < 20 && !JSON.parse(files.get(BOARD)!).lastCards; i++) await new Promise(r => setTimeout(r, 25))
+  for (let i = 0; i < 20 && !JSON.parse(files.get(BOARD)!).lastCards; i++) await ui.findAll({ type: "Text" })
   expect(JSON.parse(files.get('/home/.claude/session-kanban/live.json')!).session).not.toBe('someone-else')
   const board = JSON.parse(files.get(BOARD)!)
   expect(board.lastCards.length).toBeGreaterThan(0)
