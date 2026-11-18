@@ -28,6 +28,7 @@ test('the pane draws, with the running count in the header (2: this one and loca
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: '/home/.claude/projects/p/t.jsonl', configRoot: '/home/.claude' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
     const body =
@@ -86,6 +87,7 @@ test('a session that starts later shows cards where the shared file put them', a
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   // As desktop sessions report it: no config root, so the path comes from HOME.
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
     const body =
@@ -129,7 +131,7 @@ test('a session that starts later shows cards where the shared file put them', a
   expect(at(/Merged one/)).toBeGreaterThan(at(/^Done\/Cleanup/))
   // Every write went to the shared files, never into a project folder.
   const PREFS = '/home/.claude/session-kanban/prefs.json'
-  expect([...files.keys()].sort()).toEqual([BOARD, PREFS])
+  expect([...files.keys()].sort()).toEqual([BOARD, '/home/.claude/session-kanban/live.json', PREFS])
   // The settings were carried over into prefs.json.
   expect(JSON.parse(files.get(PREFS)!)).toEqual({ view: 'board', mode: 'dark' })
 
@@ -139,6 +141,67 @@ test('a session that starts later shows cards where the shared file put them', a
   expect(JSON.parse(files.get(PREFS)!).view).toBe('list')
   expect(JSON.parse(files.get(BOARD)!).view).toBe('board')
 
+  await ui.unmount()
+})
+
+test('only the live session writes the board; drawing it makes this one live', async ($, on) => {
+  const BOARD = '/home/.claude/session-kanban/board.json'
+  const files = new Map<string, string>([
+    [BOARD, JSON.stringify({ columns: { local_a: 'in-progress' } })],
+    ['/home/.claude/session-kanban/prefs.json', JSON.stringify({ view: 'board' })],
+    ['/home/.claude/session-kanban/live.json', JSON.stringify({ session: 'someone-else' })],
+  ])
+  const store = new Map<string, unknown>()
+  on('command.register', () => ({ value: { command: 'kanban' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  // As desktop sessions report it: no config root, so the path comes from HOME.
+  on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
+  on('mcp.call', (_, e) => {
+    const tool = (e as { tool?: string }).tool
+    const body =
+      tool === 'list_sessions' ? SESSIONS : tool === 'get_session' ? { sessionId: 'local_self', title: 'This one', link: 'claude://x' } : {}
+    return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
+  })
+  on('fs.read', (_, e) => {
+    const text = files.get((e as { path: string }).path)
+    if (text === undefined) throw new Error('missing')
+    return { value: text }
+  })
+  on('fs.exists', (_, e) => ({ value: files.has((e as { path: string }).path) }))
+  on('fs.write', (_, e) => {
+    const w = e as { path: string; text: string }
+    files.set(w.path, w.text)
+    return { value: undefined }
+  })
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.get', (_, e) => ({ value: store.get((e as { key: string }).key) }))
+  on('store.set', (_, e) => {
+    const w = e as { key: string; value: unknown }
+    store.set(w.key, w.value)
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: (e as { name: string }).name === 'HOME' ? '/home' : undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('clock.every', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: Date.parse('2026-01-02T00:00:00Z') }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'kanban', args: '' } as Parameters<typeof $.command.run>[0])
+  // Another session is live: this one placed nothing and cached nothing.
+  expect(JSON.parse(files.get(BOARD)!)).toEqual({ columns: { local_a: 'in-progress' } })
+
+  // Drawing the board here claims it, and this session catches the board up.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  for (let i = 0; i < 20 && !JSON.parse(files.get(BOARD)!).lastCards; i++) await new Promise(r => setTimeout(r, 25))
+  expect(JSON.parse(files.get('/home/.claude/session-kanban/live.json')!).session).not.toBe('someone-else')
+  const board = JSON.parse(files.get(BOARD)!)
+  expect(board.lastCards.length).toBeGreaterThan(0)
+  expect(board.columns.local_b).toBe('done')
   await ui.unmount()
 })
 
@@ -155,6 +218,7 @@ test('a board.json caught mid-write is never written over with a fragment', asyn
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   // As desktop sessions report it: no config root, so the path comes from HOME.
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
     const body =
@@ -201,6 +265,7 @@ test("this session's card has a gold ring, the others a grey one", async ($, on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('env.get', () => ({ value: '/home' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
@@ -258,6 +323,7 @@ test('list rows get the same rounded edges as board cards', async ($, on) => {
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('env.get', () => ({ value: '/home' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
@@ -312,6 +378,7 @@ test('New session starts a session in the picked project with the typed task', a
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('env.get', () => ({ value: '/home' }))
   on('mcp.call', (_, e) => {
     const call = e as { server?: string; tool?: string; args?: Record<string, unknown> }
@@ -376,6 +443,7 @@ test('the project dropdown filters the board to the picked project', async ($, o
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('env.get', () => ({ value: '/home' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
@@ -444,6 +512,7 @@ test('the header says when a newer version is installed or available', async ($,
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('env.get', () => ({ value: '/home' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool
@@ -501,6 +570,7 @@ test('an install from GitHub checks the repo for a newer version', async ($, on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.info', () => ({ value: { transcriptPath: 't.jsonl' } }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('env.get', () => ({ value: '/home' }))
   on('mcp.call', (_, e) => {
     const tool = (e as { tool?: string }).tool

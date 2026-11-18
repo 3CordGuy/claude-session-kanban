@@ -1,1 +1,1 @@
-{ "name": "session-kanban", "version": "0.7.2", "description": "Kanban board pane of your Claude sessions: Brainstorming, In Progress, Testing/Review, Done/Cleanup", "types": "./types/index.d.ts" }
+{ "name": "session-kanban", "version": "0.8.0", "description": "Kanban board pane of your Claude sessions: Brainstorming, In Progress, Testing/Review, Done/Cleanup", "types": "./types/index.d.ts" }

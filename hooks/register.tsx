@@ -178,6 +178,47 @@ async function sset($: $Any, key: string, value: unknown): Promise<void> {
   }
 }
 
+// Only the live session (the one you're looking at) does the routine writes:
+// placing new sessions, PR moves, unread marks, the card cache. The app only
+// draws the board in the session on screen, so drawing it (or a click in it)
+// claims live.json; every other session reads and draws but doesn't write.
+// Your own changes (drags, renames, view) save from wherever you make them.
+const CLAIM_EVERY_MS = 15_000
+let lastClaim = 0
+let wasLive: boolean | undefined
+
+const liveFile = async ($: $Any) => (await boardFile($)).replace(/board\.json$/, 'live.json')
+
+async function amLive($: $Any): Promise<boolean> {
+  if (fileBroken) return true
+  try {
+    const live = await readShared($, await liveFile($))
+    // Nobody has claimed it yet (first run): carry on as before.
+    if (!live || typeof live.session !== 'string') return true
+    return live.session === (await $.session.id())
+  } catch {
+    return false
+  }
+}
+
+async function claimLive($: $Any): Promise<void> {
+  if (fileBroken) return
+  const now = await $.clock.now()
+  if (now - lastClaim < CLAIM_EVERY_MS) return
+  lastClaim = now
+  try {
+    const me = await $.session.id()
+    const path = await liveFile($)
+    const live = await readShared($, path).catch(() => undefined)
+    await $.fs.write(path, JSON.stringify({ session: me, at: new Date(now).toISOString() }, null, 2))
+    // Just took over: catch up on what no session wrote while none was live.
+    if (live?.session !== me) void refresh($).catch(() => undefined)
+  } catch {
+    // Can't write it: the next draw tries again.
+    lastClaim = 0
+  }
+}
+
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 // Keys every board shares. The plugin store is kept matched to the shared
@@ -323,7 +364,7 @@ async function markUnread($: $Any, list: Card[]): Promise<void> {
     }
     c.isUnread = !c.isSelf && !c.isRunning && Date.parse(c.lastActivityAt) > Date.parse(seen[c.id] ?? '')
   }
-  if (changed) await sset($, 'seen', seen)
+  if (changed && (await amLive($))) await sset($, 'seen', seen)
 }
 
 async function markRead($: $Any, id: string): Promise<void> {
@@ -624,17 +665,23 @@ async function refresh($: $Any): Promise<void> {
     prSeen[c.id] = seenKey
     prChanged = true
   }
-  if (prChanged) await sset($, 'prSeen', prSeen)
+  const live = await amLive($)
+  if (prChanged && live) await sset($, 'prSeen', prSeen)
   // Re-read before writing and apply only this refresh's own placements, so a
-  // move made in another session meanwhile isn't overwritten.
+  // move made in another session meanwhile isn't overwritten. A session that
+  // isn't live shows them without saving; the live one saves them.
   const fresh = await loadColumns($)
   if (changed) {
     for (const [id, col] of Object.entries(placed)) fresh[id] = col
-    await sset($, 'columns', fresh)
+    if (live) await sset($, 'columns', fresh)
   }
   await update($, columns, () => ({ ...fresh }))
   await update($, cards, () => list)
-  await sset($, 'lastCards', list)
+  if (live) await sset($, 'lastCards', list)
+  if (live !== wasLive) {
+    wasLive = live
+    $.ui.log(`session-kanban: this session ${live ? 'is live and writes the board' : 'only reads the board'}`)
+  }
 }
 
 async function move($: $Any, id: string, to: ColumnId): Promise<void> {
@@ -714,7 +761,9 @@ export const register: Register = on => {
       await update($, cards, () => (lastCards as Card[]).map(c => ({ ...c, isSelf: false })))
     }
     void refresh($)
-    $.clock.every(30_000, () => void refresh($))
+    // Only the live session polls the app; the others catch up when they're
+    // shown again (drawing the board claims it and refreshes straight away).
+    $.clock.every(30_000, () => void amLive($).then(live => (live ? refresh($) : undefined)).catch(() => undefined))
     void checkVersions($)
     $.clock.every(60_000, () => void checkVersions($).catch(() => undefined))
     $.clock.every(2_000, () => void syncBoard($).catch(() => undefined))
@@ -752,6 +801,8 @@ export const register: Register = on => {
   // The drag board posts here: a drop moves a card, a click opens its session.
   on('ui.message', async ($, e, next) => {
     if (e.element !== 'board') return next(e)
+    lastClaim = 0
+    void claimLive($)
     const d = e.data as { type?: string; id?: string; to?: string }
     if (d.type === 'move' && d.id && COLUMNS.some(c => c.id === d.to)) {
       await move($, d.id, d.to as ColumnId)
@@ -774,6 +825,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    void claimLive($)
     const els = $.ui.resolve(e)
     const { Box, Text, Button, Link } = els
     const Input = 'Input' in els ? els.Input : undefined
